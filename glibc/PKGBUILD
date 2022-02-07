@@ -6,35 +6,37 @@
 
 pkgbase=glibc
 pkgname=(glibc lib32-glibc)
-pkgver=2.34
+pkgver=2.35
 pkgrel=1
 arch=(x86_64)
 url='https://www.gnu.org/software/libc'
 license=(GPL LGPL)
 makedepends=(git gd lib32-gcc-libs python)
 optdepends=('perl: for mtrace')
-options=('!strip' 'staticlibs' '!lto')
+options=(!strip staticlibs !lto)
 #_commit=3de512be7ea6053255afed6154db9ee31d4e557a
 #source=(git+https://sourceware.org/git/glibc.git#commit=$_commit
 source=(https://ftp.gnu.org/gnu/glibc/glibc-$pkgver.tar.xz{,.sig}
-        locale.gen.txt
-        locale-gen
         lib32-glibc.conf
-        sdt.h sdt-config.h)
+        locale-gen
+        locale.gen.txt
+        sdt-config.h
+        sdt.h)
 validpgpkeys=(7273542B39962DF7B299931416792B4EA25340F8 # Carlos O'Donell
               BC7C7372637EC10C57D7AA6579C43DFBF1CF2187) # Siddhesh Poyarekar
-md5sums=('31998b53fb39cb946e96abc310af1c89'
-         'SKIP'
-         '07ac979b6ab5eeb778d55f041529d623'
-         '476e9113489f93b348b21e144b6a8fcf'
-         '6e052f1cb693d5d3203f50f9d4e8c33b'
-         '91fec3b7e75510ae2ac42533aa2e695e'
-         '680df504c683640b02ed4a805797c0b2')
+sha256sums=('5123732f6b67ccd319305efd399971d58592122bcc2a6518a1bd2510dd0cf52e'
+            'SKIP'
+            'c27424154a6096ae32c0824b785e05de6acef33d9224fd6147d1936be9b4962b'
+            '83f108f915863c7ed0338e2d3e8f2e071a531a090ef8f8b2eb3a956a3c4f04d7'
+            'd42648cea552ba5353a32e264686e992263289d5cc86207314dffc54ab514981'
+            'cdc234959c6fdb43f000d3bb7d1080b0103f4080f5e67bcfe8ae1aaf477812f0'
+            '774061aff612a377714a509918a9e0e0aafce708b87d2d7e06b1bd1f6542fe70')
 
 prepare() {
   mkdir -p glibc-build lib32-glibc-build
 
-  [[ -d glibc-$pkgver ]] && ln -s glibc-$pkgver glibc 
+  [[ -d glibc-$pkgver ]] && ln -s glibc-$pkgver glibc
+  cd glibc
 }
 
 build() {
@@ -45,7 +47,7 @@ build() {
       --enable-add-ons
       --enable-bind-now
       --enable-cet
-      --enable-kernel=5.10 \
+      --enable-kernel=4.4
       --enable-lock-elision
       --enable-multi-arch
       --enable-stack-protector=strong
@@ -53,6 +55,7 @@ build() {
       --enable-static-pie
       --enable-systemtap
       --disable-profile
+      --disable-crypt
       --disable-werror
   )
 
@@ -66,25 +69,21 @@ build() {
   # remove fortify for building libraries
   CFLAGS=${CFLAGS/-Wp,-D_FORTIFY_SOURCE=2/}
 
-  #
-  CFLAGS=${CFLAGS/-fno-plt/}
-  CXXFLAGS=${CXXFLAGS/-fno-plt/}
-  LDFLAGS=${LDFLAGS/,-z,now/}
-
   "$srcdir/glibc/configure" \
       --libdir=/usr/lib \
       --libexecdir=/usr/lib \
-      ${_configure_flags[@]}
+      "${_configure_flags[@]}"
 
   # build libraries with fortify disabled
   echo "build-programs=no" >> configparms
-  make
+  make -O
 
   # re-enable fortify for programs
   sed -i "/build-programs=/s#no#yes#" configparms
 
-  echo "CFLAGS += -D_FORTIFY_SOURCE=2" >> configparms
-  make
+  echo "CC += -D_FORTIFY_SOURCE=2" >> configparms
+  echo "CXX += -D_FORTIFY_SOURCE=2" >> configparms
+  make -O
 
   # build info pages manually for reprducibility
   make info
@@ -100,36 +99,55 @@ build() {
 
   # remove fortify for building libraries
   CFLAGS=${CFLAGS/-Wp,-D_FORTIFY_SOURCE=2/}
-  CFLAGS=${CFLAGS/-fno-plt/}
-  CXXFLAGS=${CXXFLAGS/-fno-plt/}
 
   "$srcdir/glibc/configure" \
       --host=i686-pc-linux-gnu \
       --libdir=/usr/lib32 \
       --libexecdir=/usr/lib32 \
-      ${_configure_flags[@]}
+      "${_configure_flags[@]}"
 
   # build libraries with fortify disabled
   echo "build-programs=no" >> configparms
-  make
+  make -O
 
   # re-enable fortify for programs
   sed -i "/build-programs=/s#no#yes#" configparms
 
   echo "CC += -D_FORTIFY_SOURCE=2" >> configparms
   echo "CXX += -D_FORTIFY_SOURCE=2" >> configparms
-  make
+  make -O
 
+}
+
+_skip_test() {
+  test=$1
+  file=$2
+  sed -i "s/\b$test\b//" $srcdir/glibc/$file
 }
 
 check() {
   cd glibc-build
 
-  # remove fortify in preparation to run test-suite
-  sed -i '/FORTIFY/d' configparms
+  # adjust/remove buildflags that cause false-positive testsuite failures
+  sed -i '/FORTIFY/d' configparms					# failure to build testsuite
+  sed -i 's/-Werror=format-security/-Wformat-security/' config.make	# failure to build testsuite
+  sed -i '/CFLAGS/s/-fno-plt//' config.make				# 16 failures
+  sed -i '/CFLAGS/s/-fexceptions//' config.make				# 1 failure
+  LDFLAGS=${LDFLAGS/,-z,now/}						# 10 failures
 
-  # some failures are "expected"
-  make check || true
+  # The following tests fail due to restrictions in the Arch build system
+  # The correct fix is to add the following to the systemd-nspawn call:
+  # --capability=CAP_IPC_LOCK --system-call-filter="@clock @pkey"
+  _skip_test test-errno-linux sysdeps/unix/sysv/linux/Makefile
+  _skip_test tst-ntp_gettime  sysdeps/unix/sysv/linux/Makefile
+  _skip_test tst-ntp_gettimex sysdeps/unix/sysv/linux/Makefile
+  _skip_test tst-mlock2       sysdeps/unix/sysv/linux/Makefile
+  _skip_test tst-pkey         sysdeps/unix/sysv/linux/Makefile
+  _skip_test tst-adjtime      time/Makefile
+  _skip_test tst-clock2       time/Makefile
+
+  export TIMEOUTFACTOR=16
+  make -O check
 }
 
 package_glibc() {
